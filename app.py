@@ -265,6 +265,23 @@ def expand_stopwords(stopwords: set[str]) -> set[str]:
     return expanded
 
 
+def apply_phrase_replacements(text: str, replacements: dict[str, str]) -> str:
+    normalized_text = text.lower()
+    for source, target in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
+        if is_english_token(source):
+            normalized_text = re.sub(rf"\b{re.escape(source)}\b", target, normalized_text)
+        elif is_chinese_token(source):
+            normalized_text = normalized_text.replace(source, target)
+    return normalized_text
+
+
+def apply_token_replacements(tokens: list[str], replacements: dict[str, str]) -> list[str]:
+    replaced_tokens = []
+    for token in tokens:
+        replaced_tokens.append(replacements.get(token, token))
+    return replaced_tokens
+
+
 def read_wordlist_upload(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
@@ -407,13 +424,12 @@ def preprocess_documents(
 
     processed_docs = []
     for document in documents:
-        normalized_document = document.lower()
-        for source, target in replacements.items():
-            normalized_document = normalized_document.replace(source, target)
+        normalized_document = apply_phrase_replacements(document, replacements)
         tokens = tokenize(normalized_document, stopwords, language_mode)
+        tokens = apply_token_replacements(tokens, replacements)
         if replace_stem:
             tokens = [simple_english_stem(token) for token in tokens]
-        tokens = [replacements.get(token, token) for token in tokens]
+            tokens = apply_token_replacements(tokens, replacements)
         tokens = [token for token in tokens if token not in stopwords]
         tokens = [token for token in tokens if len(token) > min_token_length]
         if deduplicate_tokens:
