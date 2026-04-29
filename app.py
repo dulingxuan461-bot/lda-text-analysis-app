@@ -73,6 +73,14 @@ was
 were
 """.strip()
 
+DEFAULT_REPLACEMENTS = """
+人工智能=>AI
+新能源汽车=>新能源车
+短视频=>短视频平台
+electric=>ev
+vehicles=>vehicle
+""".strip()
+
 LANGUAGE_MODES = {
     "自动识别": "auto",
     "中文": "zh",
@@ -249,6 +257,30 @@ def parse_stopwords(raw_stopwords: str) -> set[str]:
     return words
 
 
+def parse_replacements(raw_replacements: str) -> dict[str, str]:
+    replacements: dict[str, str] = {}
+    for line in raw_replacements.splitlines():
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("#"):
+            continue
+        if "=>" in cleaned:
+            source, target = cleaned.split("=>", 1)
+        elif "=" in cleaned:
+            source, target = cleaned.split("=", 1)
+        elif "," in cleaned:
+            source, target = cleaned.split(",", 1)
+        elif "\t" in cleaned:
+            source, target = cleaned.split("\t", 1)
+        else:
+            continue
+
+        source = source.strip().lower()
+        target = target.strip().lower()
+        if source and target:
+            replacements[source] = target
+    return replacements
+
+
 def detect_language_mode(text: str) -> str:
     chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
     english_chars = len(re.findall(r"[a-zA-Z]", text))
@@ -308,16 +340,26 @@ def simple_english_stem(token: str) -> str:
 def preprocess_documents(
     documents: Iterable[str],
     stopwords: set[str],
+    replacements: dict[str, str],
     language_mode: str,
     min_token_length: int,
     deduplicate_tokens: bool,
     replace_stem: bool,
 ) -> tuple[str, ...]:
+    if jieba is not None:
+        for target in replacements.values():
+            if is_chinese_token(target):
+                jieba.add_word(target, freq=10_000_000)
+
     processed_docs = []
     for document in documents:
-        tokens = tokenize(document, stopwords, language_mode)
+        normalized_document = document.lower()
+        for source, target in replacements.items():
+            normalized_document = normalized_document.replace(source, target)
+        tokens = tokenize(normalized_document, stopwords, language_mode)
         if replace_stem:
             tokens = [simple_english_stem(token) for token in tokens]
+        tokens = [replacements.get(token, token) for token in tokens]
         tokens = [token for token in tokens if len(token) > min_token_length]
         if deduplicate_tokens:
             tokens = list(dict.fromkeys(tokens))
@@ -806,7 +848,16 @@ def render_training_controls() -> dict:
             min_df = col_c.slider("词语最少出现文档数", min_value=1, max_value=10, value=1)
             max_df = col_d.slider("词语最多出现文档比例", min_value=0.50, max_value=1.00, value=0.95, step=0.05)
             random_state = st.number_input("随机种子", min_value=0, value=42, step=1)
-            raw_stopwords = st.text_area("停用词", DEFAULT_STOPWORDS, height=150)
+            stop_col, replacement_col = st.columns(2)
+            with stop_col:
+                raw_stopwords = st.text_area("停用词", DEFAULT_STOPWORDS, height=180)
+            with replacement_col:
+                raw_replacements = st.text_area(
+                    "替换词",
+                    DEFAULT_REPLACEMENTS,
+                    height=180,
+                    help="每行一条，格式：原词=>新词。也支持 原词=新词、原词,新词。",
+                )
 
     return {
         "n_topics": n_topics,
@@ -822,6 +873,7 @@ def render_training_controls() -> dict:
         "deduplicate_tokens": deduplicate_tokens,
         "replace_stem": replace_stem,
         "raw_stopwords": raw_stopwords,
+        "raw_replacements": raw_replacements,
     }
 
 
@@ -829,6 +881,7 @@ def prepare_current_documents(documents: list[str], settings: dict) -> tuple[str
     return preprocess_documents(
         documents,
         parse_stopwords(settings["raw_stopwords"]),
+        parse_replacements(settings["raw_replacements"]),
         settings["language_mode"],
         settings["min_token_length"],
         settings["deduplicate_tokens"],
