@@ -258,6 +258,44 @@ def parse_stopwords(raw_stopwords: str) -> set[str]:
     return words
 
 
+def read_wordlist_upload(uploaded_file) -> str:
+    if uploaded_file is None:
+        return ""
+
+    suffix = uploaded_file.name.lower().rsplit(".", 1)[-1]
+    if suffix == "txt":
+        return uploaded_file.read().decode("utf-8", errors="ignore")
+
+    if suffix == "csv":
+        data = uploaded_file.read().decode("utf-8-sig", errors="ignore")
+        dataframe = pd.read_csv(StringIO(data), header=None)
+    elif suffix in {"xlsx", "xls"}:
+        dataframe = pd.read_excel(BytesIO(uploaded_file.read()), header=None)
+    else:
+        st.warning("词表文件暂时只支持 .txt、.csv、.xlsx 和 .xls。")
+        return ""
+
+    rows = []
+    for _, row in dataframe.dropna(how="all").iterrows():
+        values = [str(value).strip() for value in row.dropna().tolist() if str(value).strip()]
+        if not values:
+            continue
+        if values[0].lower() in {"原词", "旧词", "source", "from", "old"}:
+            continue
+        if len(values) >= 2:
+            rows.append(f"{values[0]}=>{values[1]}")
+        else:
+            rows.append(values[0])
+    return "\n".join(rows)
+
+
+def combine_textarea_and_upload(textarea_value: str, uploaded_file) -> str:
+    uploaded_text = read_wordlist_upload(uploaded_file)
+    if textarea_value.strip() and uploaded_text.strip():
+        return f"{textarea_value.strip()}\n{uploaded_text.strip()}"
+    return textarea_value.strip() or uploaded_text.strip()
+
+
 def parse_replacements(raw_replacements: str) -> dict[str, str]:
     replacements: dict[str, str] = {}
     for line in raw_replacements.splitlines():
@@ -852,6 +890,11 @@ def render_training_controls() -> dict:
             stop_col, replacement_col = st.columns(2)
             with stop_col:
                 raw_stopwords = st.text_area("停用词", DEFAULT_STOPWORDS, height=180)
+                stopword_upload = st.file_uploader(
+                    "上传停用词文件",
+                    type=["txt", "csv", "xlsx", "xls"],
+                    key="stopword_upload",
+                )
             with replacement_col:
                 raw_replacements = st.text_area(
                     "替换词",
@@ -859,6 +902,14 @@ def render_training_controls() -> dict:
                     height=180,
                     help="每行一条，格式：原词=>新词。也支持 原词=新词、原词,新词。",
                 )
+                replacement_upload = st.file_uploader(
+                    "上传替换词文件",
+                    type=["txt", "csv", "xlsx", "xls"],
+                    key="replacement_upload",
+                )
+
+            raw_stopwords = combine_textarea_and_upload(raw_stopwords, stopword_upload)
+            raw_replacements = combine_textarea_and_upload(raw_replacements, replacement_upload)
 
     return {
         "n_topics": n_topics,
