@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-04-29.1"
+APP_VERSION = "2026-04-29.2"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -1054,6 +1054,8 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
             min_edge_weight = st.selectbox("最小共现次数", [1, 2, 3, 5, 8], index=0, key="network_min_edge")
             run_network = st.button("点击生成关系图", key="run_network", use_container_width=True)
 
+        run_preview = st.button("预览预处理结果", key="run_preview", use_container_width=True)
+
     if run_eval:
         prepared_documents = prepare_current_documents(documents, settings)
         with st.spinner("正在评估不同主题数..."):
@@ -1124,6 +1126,17 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
             st.session_state["network_edge_df"] = edge_df
             st.session_state["active_view"] = "network"
 
+    if run_preview:
+        prepared_documents = prepare_current_documents(documents, settings)
+        preview_df = pd.DataFrame(
+            {
+                "文档序号": range(1, len(prepared_documents) + 1),
+                "预处理结果": prepared_documents,
+            }
+        )
+        st.session_state["preview_df"] = preview_df
+        st.session_state["active_view"] = "preview"
+
     if "eval_df" in st.session_state:
         render_evaluation(st.session_state["eval_df"], st.session_state.get("eval_rule", "c_v一致性"))
 
@@ -1146,6 +1159,8 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
             render_sentiment(st.session_state["sentiment_df"])
         elif active_view == "network" and "network_node_df" in st.session_state:
             render_network(st.session_state["network_node_df"], st.session_state["network_edge_df"])
+        elif active_view == "preview" and "preview_df" in st.session_state:
+            render_preprocess_preview(st.session_state["preview_df"])
         else:
             render_topics(result["topic_df"])
             render_document_distribution(result["dist_df"], result["topic_share"])
@@ -1156,6 +1171,8 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
         render_sentiment(st.session_state["sentiment_df"])
     elif st.session_state.get("active_view") == "network" and "network_node_df" in st.session_state:
         render_network(st.session_state["network_node_df"], st.session_state["network_edge_df"])
+    elif st.session_state.get("active_view") == "preview" and "preview_df" in st.session_state:
+        render_preprocess_preview(st.session_state["preview_df"])
 
 
 def render_evaluation(eval_df: pd.DataFrame, selected_rule: str) -> None:
@@ -1492,6 +1509,18 @@ def render_network(node_df: pd.DataFrame, edge_df: pd.DataFrame) -> None:
         "下载关系 CSV",
         edge_df.to_csv(index=False).encode("utf-8-sig"),
         file_name="network_edges.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+def render_preprocess_preview(preview_df: pd.DataFrame) -> None:
+    st.subheader("预处理结果预览")
+    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "下载预处理结果 CSV",
+        preview_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="preprocessed_documents.csv",
         mime="text/csv",
         use_container_width=True,
     )
