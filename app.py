@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
+APP_VERSION = "2026-04-29.1"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -1435,7 +1436,7 @@ def render_downloads(topic_df: pd.DataFrame, dist_df: pd.DataFrame) -> None:
 def main() -> None:
     configure_page()
     st.title(APP_TITLE)
-    st.caption("快速探索一组文本中的潜在主题、关键词和文档归属。")
+    st.caption(f"快速探索一组文本中的潜在主题、关键词和文档归属。版本：{APP_VERSION}")
 
     documents = load_documents()
     settings = render_training_controls()
