@@ -258,6 +258,13 @@ def parse_stopwords(raw_stopwords: str) -> set[str]:
     return words
 
 
+def expand_stopwords(stopwords: set[str]) -> set[str]:
+    expanded = set(stopwords)
+    for word in stopwords:
+        expanded.add(simple_english_stem(word))
+    return expanded
+
+
 def read_wordlist_upload(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
@@ -368,10 +375,17 @@ def tokenize(text: str, stopwords: set[str], language_mode: str) -> list[str]:
 def simple_english_stem(token: str) -> str:
     if not re.fullmatch(r"[a-z][a-z0-9_]+", token):
         return token
-    for suffix in ("ization", "ational", "fulness", "ousness", "iveness", "tional", "ingly", "edly", "ing", "ed", "ies", "s"):
+    irregulars = {
+        "movies": "movie",
+    }
+    if token in irregulars:
+        return irregulars[token]
+    for suffix in ("ization", "ational", "fulness", "ousness", "iveness", "tional", "ingly", "edly", "ing", "ed", "ies", "es", "s"):
         if token.endswith(suffix) and len(token) > len(suffix) + 2:
             if suffix == "ies":
                 return f"{token[:-3]}y"
+            if suffix == "es":
+                return token[:-2] if token.endswith(("ses", "xes", "zes", "ches", "shes")) else token[:-1]
             return token[: -len(suffix)]
     return token
 
@@ -385,6 +399,7 @@ def preprocess_documents(
     deduplicate_tokens: bool,
     replace_stem: bool,
 ) -> tuple[str, ...]:
+    stopwords = expand_stopwords(stopwords)
     if jieba is not None:
         for target in replacements.values():
             if is_chinese_token(target):
@@ -399,6 +414,7 @@ def preprocess_documents(
         if replace_stem:
             tokens = [simple_english_stem(token) for token in tokens]
         tokens = [replacements.get(token, token) for token in tokens]
+        tokens = [token for token in tokens if token not in stopwords]
         tokens = [token for token in tokens if len(token) > min_token_length]
         if deduplicate_tokens:
             tokens = list(dict.fromkeys(tokens))
