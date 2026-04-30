@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-04-29.2"
+APP_VERSION = "2026-04-30.1"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -973,6 +973,26 @@ def prepare_current_documents(documents: list[str], settings: dict) -> tuple[str
     )
 
 
+def make_classification_df(
+    documents: list[str],
+    prepared_documents: tuple[str, ...],
+    dist_df: pd.DataFrame,
+) -> pd.DataFrame:
+    topic_columns = [column for column in dist_df.columns if column.startswith("主题 ")]
+    classification_df = pd.DataFrame(
+        {
+            "文档序号": range(1, len(documents) + 1),
+            "原始评论": documents,
+            "清理后评论": list(prepared_documents),
+        }
+    )
+    classification_df["分类主题"] = dist_df["主导主题"].to_list()
+    classification_df["主题置信度"] = dist_df[topic_columns].max(axis=1).to_list()
+    for topic_column in topic_columns:
+        classification_df[f"{topic_column}概率"] = dist_df[topic_column].to_list()
+    return classification_df
+
+
 def train_current_model(documents: list[str], settings: dict, topic_count: int | None = None, top_n_words: int = 15) -> None:
     prepared_documents = prepare_current_documents(documents, settings)
     topic_df, dist_df, topic_share, topic_word_df, bubble_df, term_frequency_df, vocab_size, perplexity, log_likelihood = fit_lda(
@@ -987,10 +1007,12 @@ def train_current_model(documents: list[str], settings: dict, topic_count: int |
         settings["beta"],
         top_n_words,
     )
+    classification_df = make_classification_df(documents, prepared_documents, dist_df)
     st.session_state["lda_result"] = {
         "prepared_documents": prepared_documents,
         "topic_df": topic_df,
         "dist_df": dist_df,
+        "classification_df": classification_df,
         "topic_share": topic_share,
         "topic_word_df": topic_word_df,
         "bubble_df": bubble_df,
@@ -1164,7 +1186,8 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
         else:
             render_topics(result["topic_df"])
             render_document_distribution(result["dist_df"], result["topic_share"])
-            render_downloads(result["topic_df"], result["dist_df"])
+            render_classification_table(result["classification_df"])
+            render_downloads(result["topic_df"], result["dist_df"], result["classification_df"])
     elif st.session_state.get("active_view") == "wordcloud" and "frequency_df" in st.session_state:
         render_wordcloud(st.session_state["frequency_df"], st.session_state.get("wordcloud_image"))
     elif st.session_state.get("active_view") == "sentiment" and "sentiment_df" in st.session_state:
@@ -1526,9 +1549,36 @@ def render_preprocess_preview(preview_df: pd.DataFrame) -> None:
     )
 
 
-def render_downloads(topic_df: pd.DataFrame, dist_df: pd.DataFrame) -> None:
-    st.subheader("下载结果")
+def dataframe_to_excel_bytes(dataframe: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
+
+def render_classification_table(classification_df: pd.DataFrame) -> None:
+    st.subheader("评论主题分类结果")
+    st.dataframe(classification_df, use_container_width=True, hide_index=True)
     download_cols = st.columns(2)
+    download_cols[0].download_button(
+        "下载分类结果 CSV",
+        classification_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="comment_topic_classification.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    download_cols[1].download_button(
+        "下载分类结果 Excel",
+        dataframe_to_excel_bytes(classification_df, "分类结果"),
+        file_name="comment_topic_classification.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+
+def render_downloads(topic_df: pd.DataFrame, dist_df: pd.DataFrame, classification_df: pd.DataFrame | None = None) -> None:
+    st.subheader("下载结果")
+    download_cols = st.columns(3 if classification_df is not None else 2)
     download_cols[0].download_button(
         "下载主题关键词 CSV",
         topic_df.to_csv(index=False).encode("utf-8-sig"),
@@ -1536,6 +1586,14 @@ def render_downloads(topic_df: pd.DataFrame, dist_df: pd.DataFrame) -> None:
         mime="text/csv",
         use_container_width=True,
     )
+    if classification_df is not None:
+        download_cols[2].download_button(
+            "下载分类结果 CSV",
+            classification_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name="comment_topic_classification.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
     download_cols[1].download_button(
         "下载文档主题分布 CSV",
         dist_df.to_csv(index=False).encode("utf-8-sig"),
