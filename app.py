@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-04-30.1"
+APP_VERSION = "2026-05-10.1"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -977,8 +977,15 @@ def make_classification_df(
     documents: list[str],
     prepared_documents: tuple[str, ...],
     dist_df: pd.DataFrame,
+    topic_df: pd.DataFrame,
 ) -> pd.DataFrame:
     topic_columns = [column for column in dist_df.columns if column.startswith("主题 ")]
+    topic_keywords = (
+        topic_df.sort_values(["主题", "排名"])
+        .groupby("主题")["关键词"]
+        .apply(lambda words: "、".join(words.head(8).astype(str)))
+        .to_dict()
+    )
     classification_df = pd.DataFrame(
         {
             "文档序号": range(1, len(documents) + 1),
@@ -987,10 +994,11 @@ def make_classification_df(
         }
     )
     classification_df["分类主题"] = dist_df["主导主题"].to_list()
+    classification_df["主题关键词"] = classification_df["分类主题"].map(topic_keywords).fillna("")
     classification_df["主题置信度"] = dist_df[topic_columns].max(axis=1).to_list()
     for topic_column in topic_columns:
         classification_df[f"{topic_column}概率"] = dist_df[topic_column].to_list()
-    return classification_df
+    return classification_df.sort_values(["分类主题", "文档序号"]).reset_index(drop=True)
 
 
 def train_current_model(documents: list[str], settings: dict, topic_count: int | None = None, top_n_words: int = 15) -> None:
@@ -1007,7 +1015,7 @@ def train_current_model(documents: list[str], settings: dict, topic_count: int |
         settings["beta"],
         top_n_words,
     )
-    classification_df = make_classification_df(documents, prepared_documents, dist_df)
+    classification_df = make_classification_df(documents, prepared_documents, dist_df, topic_df)
     st.session_state["lda_result"] = {
         "prepared_documents": prepared_documents,
         "topic_df": topic_df,
