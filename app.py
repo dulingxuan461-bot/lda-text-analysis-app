@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-05-10.1"
+APP_VERSION = "2026-05-10.2"
 DEFAULT_STOPWORDS = """
 的
 了
