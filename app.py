@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-05-11.5"
+APP_VERSION = "2026-05-11.6"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -638,6 +638,34 @@ def calibrate_sentiment_labels(
     calibrated_df["校准模式"] = "语境增强目标比例校准"
     calibrated_df["目标比例"] = f"积极{target_positive:.1f}% / 中性{target_neutral:.1f}% / 消极{target_negative:.1f}%"
     return calibrated_df
+
+
+def calibrate_sentiment_labels_by_topic(
+    sentiment_df: pd.DataFrame,
+    classification_df: pd.DataFrame,
+    target_positive: float,
+    target_neutral: float,
+    target_negative: float,
+) -> pd.DataFrame:
+    adjusted_df = sentiment_df.copy()
+    if adjusted_df.empty or classification_df.empty:
+        return adjusted_df
+
+    topic_lookup = classification_df[["文档序号", "分类主题"]].drop_duplicates("文档序号")
+    work_df = adjusted_df.reset_index(names="__row_index").merge(topic_lookup, on="文档序号", how="left")
+    for _, group in work_df.groupby("分类主题", dropna=False):
+        row_indices = group["__row_index"].to_list()
+        calibrated_group = calibrate_sentiment_labels(
+            adjusted_df.loc[row_indices].copy(),
+            target_positive,
+            target_neutral,
+            target_negative,
+        )
+        adjusted_df.loc[row_indices, "情感倾向"] = calibrated_group["情感倾向"].to_numpy()
+
+    adjusted_df["校准模式"] = "按各主题目标比例校准"
+    adjusted_df["目标比例"] = f"积极{target_positive:.1f}% / 中性{target_neutral:.1f}% / 消极{target_negative:.1f}%"
+    return adjusted_df
 
 
 def build_cooccurrence_network(
@@ -1814,6 +1842,43 @@ def render_topic_sentiment_analysis(
     topic_df: pd.DataFrame,
 ) -> None:
     st.subheader("不同LDA主题下的情感分布")
+    sentiment_settings = st.session_state.get("sentiment_thresholds", {})
+    with st.container(border=True):
+        adjust_cols = st.columns([1.4, 1, 1, 1])
+        topic_adjust_mode = adjust_cols[0].selectbox(
+            "目标调整方式",
+            ["使用当前情感分类", "按全局目标比例调整", "按各主题目标比例调整"],
+            index=0,
+            key="topic_sentiment_adjust_mode",
+        )
+        topic_target_positive = adjust_cols[1].number_input(
+            "目标积极%",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(sentiment_settings.get("target_positive", 43.2)),
+            step=0.1,
+            format="%.1f",
+            key="topic_sentiment_target_positive",
+        )
+        topic_target_neutral = adjust_cols[2].number_input(
+            "目标中性%",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(sentiment_settings.get("target_neutral", 40.5)),
+            step=0.1,
+            format="%.1f",
+            key="topic_sentiment_target_neutral",
+        )
+        topic_target_negative = adjust_cols[3].number_input(
+            "目标消极%",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(sentiment_settings.get("target_negative", 16.3)),
+            step=0.1,
+            format="%.1f",
+            key="topic_sentiment_target_negative",
+        )
+
     with st.expander("自定义主题名称", expanded=False):
         raw_topic_names = st.text_area(
             "每行一个主题名称",
@@ -1823,15 +1888,38 @@ def render_topic_sentiment_analysis(
             key="topic_sentiment_custom_names",
         )
 
+    adjusted_sentiment_df = sentiment_df
+    if topic_adjust_mode == "按全局目标比例调整":
+        adjusted_sentiment_df = calibrate_sentiment_labels(
+            sentiment_df,
+            topic_target_positive,
+            topic_target_neutral,
+            topic_target_negative,
+        )
+    elif topic_adjust_mode == "按各主题目标比例调整":
+        adjusted_sentiment_df = calibrate_sentiment_labels_by_topic(
+            sentiment_df,
+            classification_df,
+            topic_target_positive,
+            topic_target_neutral,
+            topic_target_negative,
+        )
+
     summary_df, merged_df = make_topic_sentiment_distribution(
         classification_df,
-        sentiment_df,
+        adjusted_sentiment_df,
         topic_df,
         parse_custom_topic_names(raw_topic_names),
     )
     if summary_df.empty:
         st.info("需要先生成评论主题分类结果和情感分析结果，才能统计不同主题下的情感分布。")
         return
+
+    st.caption(
+        "当前统计方式："
+        f"{topic_adjust_mode}；目标比例：积极 {topic_target_positive:.1f}% / "
+        f"中性 {topic_target_neutral:.1f}% / 消极 {topic_target_negative:.1f}%"
+    )
 
     display_df = summary_df.copy()
     percent_columns = ["积极评论占比", "中性评论占比", "消极评论占比"]
