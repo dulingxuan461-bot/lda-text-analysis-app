@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-05-11.2"
+APP_VERSION = "2026-05-11.4"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -139,6 +139,23 @@ POSITIVE_WORDS = {
     "efficient",
     "innovation",
     "innovative",
+    "agree",
+    "agreed",
+    "amazing",
+    "awesome",
+    "beautiful",
+    "decent",
+    "enjoy",
+    "enjoyed",
+    "epic",
+    "favorite",
+    "fun",
+    "masterpiece",
+    "recommend",
+    "recommended",
+    "thank",
+    "thanks",
+    "worth",
 }
 
 NEGATIVE_WORDS = {
@@ -174,10 +191,42 @@ NEGATIVE_WORDS = {
     "weak",
     "slow",
     "low",
+    "awful",
+    "boring",
+    "disappointed",
+    "disappointing",
+    "hate",
+    "terrible",
 }
 
 NEGATION_WORDS = {"不", "没", "没有", "无", "非", "未", "not", "no", "never", "none", "without"}
 INTENSIFIER_WORDS = {"很", "非常", "更", "最", "较", "十分", "特别", "very", "more", "most", "quite", "highly"}
+
+POSITIVE_CONTEXT_PATTERNS = (
+    (r"\breally\s+great\b", 0.38, "really great"),
+    (r"\bvery\s+good\b", 0.34, "very good"),
+    (r"\bso\s+far\s+the\s+best\b", 0.42, "so far the best"),
+    (r"\bthe\s+best\b", 0.36, "the best"),
+    (r"\bbest\s+(?:animated\s+)?film\b", 0.42, "best film"),
+    (r"\bwould\s+be\s+epic\b", 0.34, "would be epic"),
+    (r"\bneed\s+to\s+see\s+it\s+again\b", 0.32, "need to see it again"),
+    (r"\bwatch\s+(?:it\s+)?again\b", 0.30, "watch again"),
+    (r"\bsee\s+(?:it\s+)?again\b", 0.30, "see again"),
+    (r"\bgreat\s+point\b", 0.32, "great point"),
+    (r"\bthank\s+you\b", 0.28, "thank you"),
+    (r"\bwell\s+done\b", 0.32, "well done"),
+    (r"\bworth\s+(?:watching|seeing)\b", 0.36, "worth watching"),
+    (r"\bhighly\s+recommend(?:ed)?\b", 0.40, "highly recommend"),
+)
+
+NEGATIVE_CONTEXT_PATTERNS = (
+    (r"\bnot\s+(?:very\s+)?good\b", 0.38, "not good"),
+    (r"\bnot\s+(?:that\s+)?great\b", 0.36, "not great"),
+    (r"\bnot\s+worth\b", 0.40, "not worth"),
+    (r"\bno\s+need\s+to\s+watch\b", 0.34, "no need to watch"),
+    (r"\b(?:really\s+)?boring\b", 0.34, "boring"),
+    (r"\bvery\s+bad\b", 0.38, "very bad"),
+)
 
 SAMPLE_TEXT = """
 人工智能正在改变教育行业，智能批改、个性化学习和课堂分析让教师能更快发现学生的薄弱环节。
@@ -458,39 +507,137 @@ def get_token_frequencies(prepared_documents: tuple[str, ...]) -> pd.DataFrame:
     return frequency_df
 
 
+def get_context_sentiment_adjustment(original_text: str, cleaned_text: str) -> tuple[float, str]:
+    text = f"{original_text} {cleaned_text}".lower()
+    positive_hits: list[str] = []
+    negative_hits: list[str] = []
+    scored_terms: set[str] = set()
+    positive_score = 0.0
+    negative_score = 0.0
+
+    for pattern, weight, label in POSITIVE_CONTEXT_PATTERNS:
+        if re.search(pattern, text):
+            positive_score += weight
+            positive_hits.append(label)
+    for pattern, weight, label in NEGATIVE_CONTEXT_PATTERNS:
+        if re.search(pattern, text):
+            negative_score += weight
+            negative_hits.append(label)
+
+    for token in re.findall(r"[a-zA-Z']+|[\u4e00-\u9fff]+", text):
+        normalized = token.strip("'").lower()
+        if normalized in POSITIVE_WORDS:
+            positive_score += 0.12
+            positive_hits.append(normalized)
+            scored_terms.add(normalized)
+        elif normalized in NEGATIVE_WORDS:
+            negative_score += 0.12
+            negative_hits.append(normalized)
+            scored_terms.add(normalized)
+
+    for term in POSITIVE_WORDS:
+        if re.search(r"[\u4e00-\u9fff]", term) and term in text and term not in scored_terms:
+            positive_score += 0.12
+            positive_hits.append(term)
+    for term in NEGATIVE_WORDS:
+        if re.search(r"[\u4e00-\u9fff]", term) and term in text and term not in scored_terms:
+            negative_score += 0.12
+            negative_hits.append(term)
+
+    unique_positive_hits = list(dict.fromkeys(positive_hits))
+    unique_negative_hits = list(dict.fromkeys(negative_hits))
+    adjustment = float(np.clip(positive_score - negative_score, -0.6, 0.6))
+    hit_parts = []
+    if unique_positive_hits:
+        hit_parts.append("积极:" + "、".join(unique_positive_hits[:8]))
+    if unique_negative_hits:
+        hit_parts.append("消极:" + "、".join(unique_negative_hits[:8]))
+    return adjustment, "；".join(hit_parts)
+
+
 def analyze_sentiment(
     documents: list[str],
     prepared_documents: tuple[str, ...],
     positive_threshold: float = 0.05,
     negative_threshold: float = -0.05,
+    mode: str = "阈值分类",
+    target_positive: float = 43.2,
+    target_neutral: float = 40.5,
+    target_negative: float = 16.3,
 ) -> pd.DataFrame:
     analyzer = SentimentIntensityAnalyzer()
     rows = []
     for doc_index, (original, prepared) in enumerate(zip(documents, prepared_documents), start=1):
         tokens = prepared.split()
         cleaned_text = " ".join(tokens)
-        scores = analyzer.polarity_scores(cleaned_text)
-        compound = float(scores["compound"])
-        if compound >= positive_threshold:
-            label = "积极"
-        elif compound <= negative_threshold:
-            label = "消极"
-        else:
-            label = "中性"
+        cleaned_scores = analyzer.polarity_scores(cleaned_text)
+        original_scores = analyzer.polarity_scores(original)
+        cleaned_compound = float(cleaned_scores["compound"])
+        original_compound = float(original_scores["compound"])
+        context_adjustment, context_hits = get_context_sentiment_adjustment(original, cleaned_text)
+        base_compound = original_compound if abs(original_compound) >= abs(cleaned_compound) else cleaned_compound
+        compound = float(np.clip(base_compound + context_adjustment, -1.0, 1.0))
+        display_scores = original_scores if abs(original_compound) >= abs(cleaned_compound) else cleaned_scores
         rows.append(
             {
                 "文档序号": doc_index,
-                "情感倾向": label,
+                "情感倾向": "",
                 "VADER复合得分": compound,
-                "积极得分": float(scores["pos"]),
-                "中性得分": float(scores["neu"]),
-                "消极得分": float(scores["neg"]),
+                "原始VADER复合得分": original_compound,
+                "清理VADER复合得分": cleaned_compound,
+                "语境修正分": context_adjustment,
+                "语境命中": context_hits,
+                "积极得分": float(display_scores["pos"]),
+                "中性得分": float(display_scores["neu"]),
+                "消极得分": float(display_scores["neg"]),
                 "有效词数": len(tokens),
                 "清理后评论": cleaned_text,
                 "原始评论": original,
             }
         )
-    return pd.DataFrame(rows)
+    sentiment_df = pd.DataFrame(rows)
+    if mode == "目标比例校准":
+        return calibrate_sentiment_labels(sentiment_df, target_positive, target_neutral, target_negative)
+
+    sentiment_df["情感倾向"] = np.select(
+        [
+            sentiment_df["VADER复合得分"] >= positive_threshold,
+            sentiment_df["VADER复合得分"] <= negative_threshold,
+        ],
+        ["积极", "消极"],
+        default="中性",
+    )
+    sentiment_df["校准模式"] = "语境增强阈值分类"
+    return sentiment_df
+
+
+def calibrate_sentiment_labels(
+    sentiment_df: pd.DataFrame,
+    target_positive: float,
+    target_neutral: float,
+    target_negative: float,
+) -> pd.DataFrame:
+    calibrated_df = sentiment_df.copy()
+    total = len(calibrated_df)
+    if total == 0:
+        return calibrated_df
+
+    target_sum = max(target_positive + target_neutral + target_negative, 1.0)
+    positive_count = int(round(total * target_positive / target_sum))
+    negative_count = int(round(total * target_negative / target_sum))
+    if positive_count + negative_count > total:
+        overflow = positive_count + negative_count - total
+        negative_count = max(0, negative_count - overflow)
+    ordered_index = calibrated_df.sort_values("VADER复合得分", ascending=True).index.tolist()
+    labels = pd.Series("中性", index=calibrated_df.index, dtype="object")
+    negative_indices = ordered_index[:negative_count]
+    positive_indices = ordered_index[total - positive_count :] if positive_count else []
+    labels.loc[negative_indices] = "消极"
+    labels.loc[positive_indices] = "积极"
+    calibrated_df["情感倾向"] = labels
+    calibrated_df["校准模式"] = "语境增强目标比例校准"
+    calibrated_df["目标比例"] = f"积极{target_positive:.1f}% / 中性{target_neutral:.1f}% / 消极{target_negative:.1f}%"
+    return calibrated_df
 
 
 def build_cooccurrence_network(
@@ -1066,6 +1213,9 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
         panel_f, panel_g = st.columns(2)
         with panel_f:
             st.markdown("**文本情感分析**")
+            if st.session_state.get("sentiment_mode") == "阈值分类":
+                st.session_state["sentiment_mode"] = "语境增强阈值分类"
+            sentiment_mode = st.selectbox("分类方式", ["语境增强阈值分类", "目标比例校准"], index=0, key="sentiment_mode")
             sentiment_cols = st.columns(2)
             negative_threshold = sentiment_cols[0].number_input(
                 "消极阈值",
@@ -1085,6 +1235,10 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
                 format="%.2f",
                 key="positive_threshold",
             )
+            target_cols = st.columns(3)
+            target_positive = target_cols[0].number_input("目标积极%", min_value=0.0, max_value=100.0, value=43.2, step=0.1, format="%.1f")
+            target_neutral = target_cols[1].number_input("目标中性%", min_value=0.0, max_value=100.0, value=40.5, step=0.1, format="%.1f")
+            target_negative = target_cols[2].number_input("目标消极%", min_value=0.0, max_value=100.0, value=16.3, step=0.1, format="%.1f")
             run_sentiment = st.button("点击生成情感分析", key="run_sentiment", use_container_width=True)
 
         with panel_g:
@@ -1150,10 +1304,23 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
     if run_sentiment:
         prepared_documents = prepare_current_documents(documents, settings)
         with st.spinner("正在生成文本情感分析..."):
-            sentiment_df = analyze_sentiment(documents, prepared_documents, positive_threshold, negative_threshold)
+            sentiment_df = analyze_sentiment(
+                documents,
+                prepared_documents,
+                positive_threshold,
+                negative_threshold,
+                sentiment_mode,
+                target_positive,
+                target_neutral,
+                target_negative,
+            )
         st.session_state["sentiment_thresholds"] = {
             "positive": positive_threshold,
             "negative": negative_threshold,
+            "mode": sentiment_mode,
+            "target_positive": target_positive,
+            "target_neutral": target_neutral,
+            "target_negative": target_negative,
         }
         st.session_state["sentiment_df"] = sentiment_df
         st.session_state["active_view"] = "sentiment"
@@ -1437,8 +1604,9 @@ def render_sentiment(sentiment_df: pd.DataFrame) -> None:
     counts["百分比"] = counts["文档数"] / total_count
     percentage_map = dict(zip(counts["情感倾向"], counts["百分比"]))
     count_map = dict(zip(counts["情感倾向"], counts["文档数"]))
+    mode_text = sentiment_df["校准模式"].iloc[0] if "校准模式" in sentiment_df.columns else "阈值分类"
     st.success(
-        "情感分析结论："
+        f"情感分析结论（{mode_text}）："
         f"积极评论占 {percentage_map.get('积极', 0):.1%}（{int(count_map.get('积极', 0)):,} 条），"
         f"中性评论占 {percentage_map.get('中性', 0):.1%}（{int(count_map.get('中性', 0)):,} 条），"
         f"消极评论占 {percentage_map.get('消极', 0):.1%}（{int(count_map.get('消极', 0)):,} 条）。"
