@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-05-11.4"
+APP_VERSION = "2026-05-11.5"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -1138,6 +1138,91 @@ def make_classification_df(
     return classification_df.sort_values(["分类主题", "文档序号"]).reset_index(drop=True)
 
 
+def make_topic_name_map(topic_df: pd.DataFrame, top_n: int = 6) -> dict[str, str]:
+    return (
+        topic_df.sort_values(["主题", "排名"])
+        .groupby("主题")["关键词"]
+        .apply(lambda words: "、".join(words.head(top_n).astype(str)))
+        .to_dict()
+    )
+
+
+def topic_sort_key(topic_label: str) -> int:
+    match = re.search(r"(\d+)", str(topic_label))
+    return int(match.group(1)) if match else 0
+
+
+def parse_custom_topic_names(raw_topic_names: str) -> dict[str, str]:
+    custom_names: dict[str, str] = {}
+    for line in raw_topic_names.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = re.split(r"\s*(?:=>|=|,|\t)\s*", line, maxsplit=1)
+        if len(parts) != 2:
+            continue
+        topic_key, topic_name = parts[0].strip(), parts[1].strip()
+        topic_number = topic_sort_key(topic_key)
+        if topic_number and topic_name:
+            custom_names[f"主题 {topic_number}"] = topic_name
+    return custom_names
+
+
+def make_topic_sentiment_distribution(
+    classification_df: pd.DataFrame,
+    sentiment_df: pd.DataFrame,
+    topic_df: pd.DataFrame,
+    custom_topic_names: dict[str, str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if classification_df.empty or sentiment_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    topic_names = make_topic_name_map(topic_df)
+    if custom_topic_names:
+        topic_names.update(custom_topic_names)
+
+    merged_df = classification_df.merge(
+        sentiment_df[
+            [
+                "文档序号",
+                "情感倾向",
+                "VADER复合得分",
+                "积极得分",
+                "中性得分",
+                "消极得分",
+            ]
+        ],
+        on="文档序号",
+        how="inner",
+    )
+    if merged_df.empty:
+        return pd.DataFrame(), merged_df
+
+    rows = []
+    for topic_label, group in merged_df.groupby("分类主题", sort=False):
+        total = max(len(group), 1)
+        sentiment_counts = group["情感倾向"].value_counts()
+        positive_share = float(sentiment_counts.get("积极", 0) / total)
+        neutral_share = float(sentiment_counts.get("中性", 0) / total)
+        negative_share = float(sentiment_counts.get("消极", 0) / total)
+        topic_number = topic_sort_key(topic_label)
+        rows.append(
+            {
+                "主题排序": topic_number,
+                "主题": f"Topic {topic_number}" if topic_number else str(topic_label),
+                "主题名称": topic_names.get(topic_label, ""),
+                "积极评论占比": positive_share,
+                "中性评论占比": neutral_share,
+                "消极评论占比": negative_share,
+                "平均compound得分": float(group["VADER复合得分"].mean()),
+                "评论数量": int(total),
+            }
+        )
+
+    summary_df = pd.DataFrame(rows).sort_values("主题排序").drop(columns=["主题排序"]).reset_index(drop=True)
+    return summary_df, merged_df
+
+
 def train_current_model(documents: list[str], settings: dict, topic_count: int | None = None, top_n_words: int = 15) -> None:
     prepared_documents = prepare_current_documents(documents, settings)
     topic_df, dist_df, topic_share, topic_word_df, bubble_df, term_frequency_df, vocab_size, perplexity, log_likelihood = fit_lda(
@@ -1376,6 +1461,12 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
             render_document_distribution(result["dist_df"], result["topic_share"])
             render_classification_table(result["classification_df"])
             render_downloads(result["topic_df"], result["dist_df"], result["classification_df"])
+            if "sentiment_df" in st.session_state:
+                render_topic_sentiment_analysis(
+                    result["classification_df"],
+                    st.session_state["sentiment_df"],
+                    result["topic_df"],
+                )
     elif st.session_state.get("active_view") == "wordcloud" and "frequency_df" in st.session_state:
         render_wordcloud(st.session_state["frequency_df"], st.session_state.get("wordcloud_image"))
     elif st.session_state.get("active_view") == "sentiment" and "sentiment_df" in st.session_state:
@@ -1692,6 +1783,12 @@ def render_sentiment(sentiment_df: pd.DataFrame) -> None:
         use_container_width=True,
     )
 
+    result = st.session_state.get("lda_result")
+    if result:
+        render_topic_sentiment_analysis(result["classification_df"], sentiment_df, result["topic_df"])
+    else:
+        st.info("训练 LDA 模型并生成主题分类后，这里会显示不同主题下的情感分布。")
+
 
 def make_sentiment_interval_df(sentiment_df: pd.DataFrame) -> pd.DataFrame:
     bins = [-1.0, -0.6, -0.2, 0.2, 0.6, 1.000001]
@@ -1709,6 +1806,146 @@ def make_sentiment_interval_df(sentiment_df: pd.DataFrame) -> pd.DataFrame:
     interval_df["百分比"] = interval_df["评论数量"] / total_count
     interval_df["百分比文本"] = interval_df["百分比"].map(lambda value: f"{value:.1%}")
     return interval_df
+
+
+def render_topic_sentiment_analysis(
+    classification_df: pd.DataFrame,
+    sentiment_df: pd.DataFrame,
+    topic_df: pd.DataFrame,
+) -> None:
+    st.subheader("不同LDA主题下的情感分布")
+    with st.expander("自定义主题名称", expanded=False):
+        raw_topic_names = st.text_area(
+            "每行一个主题名称",
+            value="",
+            placeholder="Topic 1=哪吒形象识别与神话角色吸引\nTopic 2=家庭伦理与命运成长叙事",
+            height=120,
+            key="topic_sentiment_custom_names",
+        )
+
+    summary_df, merged_df = make_topic_sentiment_distribution(
+        classification_df,
+        sentiment_df,
+        topic_df,
+        parse_custom_topic_names(raw_topic_names),
+    )
+    if summary_df.empty:
+        st.info("需要先生成评论主题分类结果和情感分析结果，才能统计不同主题下的情感分布。")
+        return
+
+    display_df = summary_df.copy()
+    percent_columns = ["积极评论占比", "中性评论占比", "消极评论占比"]
+    for column in percent_columns:
+        display_df[column] = display_df[column].map(lambda value: f"{value:.2%}")
+    display_df["平均compound得分"] = display_df["平均compound得分"].map(lambda value: f"{value:.3f}")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    chart_df = summary_df.melt(
+        id_vars=["主题", "主题名称", "平均compound得分", "评论数量"],
+        value_vars=percent_columns,
+        var_name="情感类别",
+        value_name="占比",
+    )
+    chart_df["情感类别"] = chart_df["情感类别"].str.replace("评论占比", "", regex=False)
+    chart_df["占比文本"] = chart_df["占比"].map(lambda value: f"{value:.1%}")
+
+    left, right = st.columns([1.15, 0.85])
+    with left:
+        stack_chart = px.bar(
+            chart_df,
+            x="主题",
+            y="占比",
+            color="情感类别",
+            text="占比文本",
+            hover_data={"主题名称": True, "评论数量": True, "占比": ":.2%"},
+            color_discrete_map={"积极": "#4f8f7a", "中性": "#9ca3af", "消极": "#d95f5f"},
+        )
+        stack_chart.update_layout(
+            barmode="stack",
+            height=430,
+            margin=dict(l=12, r=12, t=18, b=12),
+            yaxis_tickformat=".0%",
+            yaxis_title="评论占比",
+        )
+        st.plotly_chart(stack_chart, use_container_width=True)
+
+    with right:
+        compound_chart = px.bar(
+            summary_df,
+            x="主题",
+            y="平均compound得分",
+            text=summary_df["平均compound得分"].map(lambda value: f"{value:.3f}"),
+            hover_data={"主题名称": True, "评论数量": True},
+            color="平均compound得分",
+            color_continuous_scale=["#d95f5f", "#f3f4f6", "#4f8f7a"],
+        )
+        compound_chart.add_hline(y=0, line_width=1, line_dash="dash", line_color="#9ca3af")
+        compound_chart.update_layout(
+            height=430,
+            margin=dict(l=12, r=12, t=18, b=12),
+            coloraxis_showscale=False,
+            yaxis_title="平均compound得分",
+        )
+        st.plotly_chart(compound_chart, use_container_width=True)
+
+    detail_cols = st.columns(2)
+    topic_options = ["全部"] + summary_df["主题"].tolist()
+    selected_topic = detail_cols[0].selectbox("筛选主题评论", topic_options, key="topic_sentiment_topic_filter")
+    selected_sentiment = detail_cols[1].selectbox("筛选情感类别", ["全部", "积极", "中性", "消极"], key="topic_sentiment_label_filter")
+
+    detail_df = merged_df.copy()
+    detail_df["主题"] = detail_df["分类主题"].map(lambda value: f"Topic {topic_sort_key(value)}")
+    if selected_topic != "全部":
+        detail_df = detail_df[detail_df["主题"] == selected_topic]
+    if selected_sentiment != "全部":
+        detail_df = detail_df[detail_df["情感倾向"] == selected_sentiment]
+
+    detail_columns = [
+        "文档序号",
+        "主题",
+        "分类主题",
+        "主题关键词",
+        "主题置信度",
+        "情感倾向",
+        "VADER复合得分",
+        "积极得分",
+        "中性得分",
+        "消极得分",
+        "清理后评论",
+        "原始评论",
+    ]
+    st.dataframe(detail_df[[column for column in detail_columns if column in detail_df.columns]], use_container_width=True, hide_index=True)
+
+    download_cols = st.columns(4)
+    download_cols[0].download_button(
+        "下载主题情感分布 CSV",
+        display_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="topic_sentiment_distribution.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    download_cols[1].download_button(
+        "下载主题情感分布 Excel",
+        dataframe_to_excel_bytes(display_df, "主题情感分布"),
+        file_name="topic_sentiment_distribution.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    download_cols[2].download_button(
+        "下载主题情感评论 CSV",
+        detail_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="topic_sentiment_comments.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    download_cols[3].download_button(
+        "下载主题情感评论 Excel",
+        dataframe_to_excel_bytes(detail_df, "主题情感评论"),
+        file_name="topic_sentiment_comments.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 
 def render_network(node_df: pd.DataFrame, edge_df: pd.DataFrame) -> None:
