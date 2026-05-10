@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-05-11.1"
+APP_VERSION = "2026-05-11.2"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -458,7 +458,12 @@ def get_token_frequencies(prepared_documents: tuple[str, ...]) -> pd.DataFrame:
     return frequency_df
 
 
-def analyze_sentiment(documents: list[str], prepared_documents: tuple[str, ...]) -> pd.DataFrame:
+def analyze_sentiment(
+    documents: list[str],
+    prepared_documents: tuple[str, ...],
+    positive_threshold: float = 0.05,
+    negative_threshold: float = -0.05,
+) -> pd.DataFrame:
     analyzer = SentimentIntensityAnalyzer()
     rows = []
     for doc_index, (original, prepared) in enumerate(zip(documents, prepared_documents), start=1):
@@ -466,9 +471,9 @@ def analyze_sentiment(documents: list[str], prepared_documents: tuple[str, ...])
         cleaned_text = " ".join(tokens)
         scores = analyzer.polarity_scores(cleaned_text)
         compound = float(scores["compound"])
-        if compound >= 0.05:
+        if compound >= positive_threshold:
             label = "积极"
-        elif compound <= -0.05:
+        elif compound <= negative_threshold:
             label = "消极"
         else:
             label = "中性"
@@ -1061,6 +1066,25 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
         panel_f, panel_g = st.columns(2)
         with panel_f:
             st.markdown("**文本情感分析**")
+            sentiment_cols = st.columns(2)
+            negative_threshold = sentiment_cols[0].number_input(
+                "消极阈值",
+                min_value=-1.0,
+                max_value=0.0,
+                value=-0.05,
+                step=0.01,
+                format="%.2f",
+                key="negative_threshold",
+            )
+            positive_threshold = sentiment_cols[1].number_input(
+                "积极阈值",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.05,
+                step=0.01,
+                format="%.2f",
+                key="positive_threshold",
+            )
             run_sentiment = st.button("点击生成情感分析", key="run_sentiment", use_container_width=True)
 
         with panel_g:
@@ -1126,7 +1150,11 @@ def render_tool_panels(documents: list[str], settings: dict) -> None:
     if run_sentiment:
         prepared_documents = prepare_current_documents(documents, settings)
         with st.spinner("正在生成文本情感分析..."):
-            sentiment_df = analyze_sentiment(documents, prepared_documents)
+            sentiment_df = analyze_sentiment(documents, prepared_documents, positive_threshold, negative_threshold)
+        st.session_state["sentiment_thresholds"] = {
+            "positive": positive_threshold,
+            "negative": negative_threshold,
+        }
         st.session_state["sentiment_df"] = sentiment_df
         st.session_state["active_view"] = "sentiment"
 
@@ -1407,6 +1435,14 @@ def render_sentiment(sentiment_df: pd.DataFrame) -> None:
     counts.columns = ["情感倾向", "文档数"]
     total_count = max(int(counts["文档数"].sum()), 1)
     counts["百分比"] = counts["文档数"] / total_count
+    percentage_map = dict(zip(counts["情感倾向"], counts["百分比"]))
+    count_map = dict(zip(counts["情感倾向"], counts["文档数"]))
+    st.success(
+        "情感分析结论："
+        f"积极评论占 {percentage_map.get('积极', 0):.1%}（{int(count_map.get('积极', 0)):,} 条），"
+        f"中性评论占 {percentage_map.get('中性', 0):.1%}（{int(count_map.get('中性', 0)):,} 条），"
+        f"消极评论占 {percentage_map.get('消极', 0):.1%}（{int(count_map.get('消极', 0)):,} 条）。"
+    )
 
     metric_cols = st.columns(4)
     metric_cols[0].metric("有效评论数", f"{len(sentiment_df):,}")
