@@ -7,3 +7,4 @@ jieba>=0.42
 openpyxl>=3.1
 wordcloud>=1.9
 networkx>=3.0
+vaderSentiment>=3.3.2

@@ -15,6 +15,7 @@ import streamlit as st
 from sklearn.decomposition import LatentDirichletAllocation
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_distances
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from wordcloud import WordCloud
 
 try:
@@ -24,7 +25,7 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal installs
 
 
 APP_TITLE = "LDA 主题建模"
-APP_VERSION = "2026-05-10.2"
+APP_VERSION = "2026-05-11.1"
 DEFAULT_STOPWORDS = """
 的
 了
@@ -458,34 +459,16 @@ def get_token_frequencies(prepared_documents: tuple[str, ...]) -> pd.DataFrame:
 
 
 def analyze_sentiment(documents: list[str], prepared_documents: tuple[str, ...]) -> pd.DataFrame:
+    analyzer = SentimentIntensityAnalyzer()
     rows = []
     for doc_index, (original, prepared) in enumerate(zip(documents, prepared_documents), start=1):
         tokens = prepared.split()
-        raw_score = 0.0
-        positive_hits = 0
-        negative_hits = 0
-        for index, token in enumerate(tokens):
-            weight = 0.0
-            if token in POSITIVE_WORDS:
-                weight = 1.0
-                positive_hits += 1
-            elif token in NEGATIVE_WORDS:
-                weight = -1.0
-                negative_hits += 1
-            if weight == 0:
-                continue
-
-            window = tokens[max(0, index - 2) : index]
-            if any(word in NEGATION_WORDS for word in window):
-                weight *= -1
-            if any(word in INTENSIFIER_WORDS for word in window):
-                weight *= 1.5
-            raw_score += weight
-
-        normalized_score = raw_score / max(np.sqrt(len(tokens)), 1.0)
-        if normalized_score > 0.08:
+        cleaned_text = " ".join(tokens)
+        scores = analyzer.polarity_scores(cleaned_text)
+        compound = float(scores["compound"])
+        if compound >= 0.05:
             label = "积极"
-        elif normalized_score < -0.08:
+        elif compound <= -0.05:
             label = "消极"
         else:
             label = "中性"
@@ -493,11 +476,13 @@ def analyze_sentiment(documents: list[str], prepared_documents: tuple[str, ...])
             {
                 "文档序号": doc_index,
                 "情感倾向": label,
-                "情感得分": normalized_score,
-                "积极词数": positive_hits,
-                "消极词数": negative_hits,
+                "VADER复合得分": compound,
+                "积极得分": float(scores["pos"]),
+                "中性得分": float(scores["neu"]),
+                "消极得分": float(scores["neg"]),
                 "有效词数": len(tokens),
-                "文档": original,
+                "清理后评论": cleaned_text,
+                "原始评论": original,
             }
         )
     return pd.DataFrame(rows)
@@ -1417,15 +1402,17 @@ def render_wordcloud(frequency_df: pd.DataFrame, image_bytes: bytes | None) -> N
 
 
 def render_sentiment(sentiment_df: pd.DataFrame) -> None:
-    st.subheader("文本情感分析")
+    st.subheader("VADER 情感分析")
     counts = sentiment_df["情感倾向"].value_counts().reindex(["积极", "中性", "消极"], fill_value=0).reset_index()
     counts.columns = ["情感倾向", "文档数"]
+    total_count = max(int(counts["文档数"].sum()), 1)
+    counts["百分比"] = counts["文档数"] / total_count
 
     metric_cols = st.columns(4)
-    metric_cols[0].metric("平均情感得分", f"{sentiment_df['情感得分'].mean():.3f}")
-    metric_cols[1].metric("积极文档", int(counts.loc[counts["情感倾向"] == "积极", "文档数"].iloc[0]))
-    metric_cols[2].metric("中性文档", int(counts.loc[counts["情感倾向"] == "中性", "文档数"].iloc[0]))
-    metric_cols[3].metric("消极文档", int(counts.loc[counts["情感倾向"] == "消极", "文档数"].iloc[0]))
+    metric_cols[0].metric("有效评论数", f"{len(sentiment_df):,}")
+    metric_cols[1].metric("平均复合得分", f"{sentiment_df['VADER复合得分'].mean():.3f}")
+    metric_cols[2].metric("积极评论", int(counts.loc[counts["情感倾向"] == "积极", "文档数"].iloc[0]))
+    metric_cols[3].metric("消极评论", int(counts.loc[counts["情感倾向"] == "消极", "文档数"].iloc[0]))
 
     left, right = st.columns([0.9, 1.1])
     with left:
@@ -1437,30 +1424,87 @@ def render_sentiment(sentiment_df: pd.DataFrame) -> None:
             color="情感倾向",
             color_discrete_map={"积极": "#4f8f7a", "中性": "#9ca3af", "消极": "#d95f5f"},
         )
+        pie.update_traces(textinfo="percent+label")
         pie.update_layout(margin=dict(l=12, r=12, t=16, b=12))
         st.plotly_chart(pie, use_container_width=True)
 
     with right:
-        line = px.line(
+        hist = px.histogram(
             sentiment_df,
-            x="文档序号",
-            y="情感得分",
+            x="VADER复合得分",
             color="情感倾向",
-            markers=True,
+            nbins=40,
+            barmode="overlay",
             color_discrete_map={"积极": "#4f8f7a", "中性": "#9ca3af", "消极": "#d95f5f"},
         )
-        line.add_hline(y=0, line_width=1, line_dash="dash", line_color="#9ca3af")
-        line.update_layout(height=390, margin=dict(l=12, r=12, t=16, b=12))
-        st.plotly_chart(line, use_container_width=True)
+        hist.add_vline(x=-0.05, line_width=1, line_dash="dash", line_color="#d95f5f")
+        hist.add_vline(x=0.05, line_width=1, line_dash="dash", line_color="#4f8f7a")
+        hist.update_layout(height=390, margin=dict(l=12, r=12, t=16, b=12), yaxis_title="评论数量")
+        st.plotly_chart(hist, use_container_width=True)
 
-    st.dataframe(sentiment_df, use_container_width=True, hide_index=True)
-    st.download_button(
-        "下载情感分析 CSV",
+    interval_df = make_sentiment_interval_df(sentiment_df)
+    interval_chart = px.bar(
+        interval_df,
+        x="情感分数区间",
+        y="评论数量",
+        text="百分比文本",
+        color="情感分数区间",
+        color_discrete_sequence=["#d95f5f", "#e8a15d", "#9ca3af", "#7fbf9b", "#4f8f7a"],
+    )
+    interval_chart.update_layout(height=390, margin=dict(l=12, r=12, t=18, b=12), showlegend=False)
+    st.plotly_chart(interval_chart, use_container_width=True)
+
+    selected_label = st.selectbox("选择情感类别查看评论", ["全部", "积极", "中性", "消极"], index=0)
+    table_df = sentiment_df if selected_label == "全部" else sentiment_df[sentiment_df["情感倾向"] == selected_label]
+    st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+    download_cols = st.columns(4)
+    download_cols[0].download_button(
+        "下载全部情感分析 CSV",
         sentiment_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="sentiment_analysis.csv",
+        file_name="vader_sentiment_analysis.csv",
         mime="text/csv",
         use_container_width=True,
     )
+    download_cols[1].download_button(
+        "下载当前类别评论 CSV",
+        table_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"vader_sentiment_{selected_label}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    download_cols[2].download_button(
+        "下载当前类别评论 Excel",
+        dataframe_to_excel_bytes(table_df, "情感评论"),
+        file_name=f"vader_sentiment_{selected_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+    download_cols[3].download_button(
+        "下载分数区间统计 CSV",
+        interval_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="vader_sentiment_intervals.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
+def make_sentiment_interval_df(sentiment_df: pd.DataFrame) -> pd.DataFrame:
+    bins = [-1.0, -0.6, -0.2, 0.2, 0.6, 1.000001]
+    labels = ["[-1.0,-0.6)", "[-0.6,-0.2)", "[-0.2,0.2)", "[0.2,0.6)", "[0.6,1.0]"]
+    intervals = pd.cut(
+        sentiment_df["VADER复合得分"],
+        bins=bins,
+        labels=labels,
+        include_lowest=True,
+        right=False,
+    )
+    interval_df = intervals.value_counts(sort=False).reindex(labels, fill_value=0).reset_index()
+    interval_df.columns = ["情感分数区间", "评论数量"]
+    total_count = max(int(interval_df["评论数量"].sum()), 1)
+    interval_df["百分比"] = interval_df["评论数量"] / total_count
+    interval_df["百分比文本"] = interval_df["百分比"].map(lambda value: f"{value:.1%}")
+    return interval_df
 
 
 def render_network(node_df: pd.DataFrame, edge_df: pd.DataFrame) -> None:
